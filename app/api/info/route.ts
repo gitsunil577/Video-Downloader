@@ -1,20 +1,36 @@
 import { NextRequest } from 'next/server'
-import path from 'path'
-import ytDlpExec from 'yt-dlp-exec'
+import { spawn } from 'child_process'
+import { getYtDlpBin, youtubeBypassArgs, allowedHosts, withRetry } from '../ytdlp-helpers'
 
 export const runtime = 'nodejs'
 
-// process.cwd() always returns the real project root — safe from Next.js path virtualization
-function getYtDlpBin(): string {
-  const bin = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'
-  return path.join(process.cwd(), 'node_modules', 'yt-dlp-exec', 'bin', bin)
-}
+function runYtDlpJson(url: string): Promise<VideoInfo> {
+  return new Promise((resolve, reject) => {
+    const args = [
+      url,
+      '--dump-single-json',
+      '--no-check-certificates',
+      '--no-warnings',
+      '--no-playlist',
+      ...youtubeBypassArgs(),
+    ]
 
-const allowedHosts = [
-  'youtube.com', 'www.youtube.com', 'youtu.be', 'm.youtube.com',
-  'facebook.com', 'www.facebook.com', 'fb.watch', 'm.facebook.com',
-  'instagram.com', 'www.instagram.com',
-]
+    let stdout = ''
+    let stderr = ''
+    const proc = spawn(getYtDlpBin(), args)
+    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString() })
+    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
+    proc.on('error', reject)
+    proc.on('close', (code) => {
+      if (code === 0) {
+        try { resolve(JSON.parse(stdout)) }
+        catch (e) { reject(e) }
+      } else {
+        reject(new Error(stderr.trim() || `yt-dlp exited with code ${code}`))
+      }
+    })
+  })
+}
 
 export async function POST(request: NextRequest) {
   const { url } = await request.json()
@@ -35,18 +51,8 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: 'Only YouTube, Facebook, and Instagram URLs are supported' }, { status: 400 })
   }
 
-  // Create a yt-dlp instance with the correctly resolved binary path
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ytdlp = (ytDlpExec as any).create(getYtDlpBin())
-
   try {
-    const info = await (ytdlp as (url: string, opts: object) => Promise<VideoInfo>)(url, {
-      dumpSingleJson: true,
-      noCheckCertificates: true,
-      noWarnings: true,
-      preferFreeFormats: true,
-      addHeader: ['referer:youtube.com', 'user-agent:Mozilla/5.0'],
-    })
+    const info = await withRetry(() => runYtDlpJson(url))
 
     const formats: Format[] = []
 
@@ -54,7 +60,7 @@ export async function POST(request: NextRequest) {
       const seen = new Set<string>()
       for (const f of info.formats) {
         if (!f.url) continue
-        if (f.vcodec === 'none') continue // skip audio-only
+        if (f.vcodec === 'none') continue
 
         const height = f.height || 0
         const label = height ? `${height}p` : (f.format_note || f.format_id)
@@ -76,7 +82,6 @@ export async function POST(request: NextRequest) {
       formats.sort((a, b) => (b.height || 0) - (a.height || 0))
     }
 
-    // Deduplicate by label, prefer formats with audio
     const deduped: Format[] = []
     const labelSeen = new Map<string, number>()
     for (const f of formats) {
@@ -100,10 +105,13 @@ export async function POST(request: NextRequest) {
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error('yt-dlp error:', msg)
-    return Response.json(
-      { error: 'Could not fetch video info. Make sure the URL is valid and the video is public.' },
-      { status: 500 }
-    )
+
+    const isBot = msg.includes('Sign in') || msg.includes('bot')
+    const userMsg = isBot
+      ? 'YouTube is blocking automated access. Add a cookies.txt file to the project root to fix this — see the console for instructions.'
+      : 'Could not fetch video info. Make sure the URL is valid and the video is public.'
+
+    return Response.json({ error: userMsg }, { status: 500 })
   }
 }
 

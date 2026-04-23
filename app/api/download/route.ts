@@ -1,27 +1,12 @@
 import { NextRequest } from 'next/server'
 import { spawn } from 'child_process'
-import path from 'path'
 import fs from 'fs'
 import os from 'os'
+import path from 'path'
+import { getYtDlpBin, getFfmpegBin, youtubeBypassArgs, allowedHosts, withRetry } from '../ytdlp-helpers'
 
 export const runtime = 'nodejs'
-
-function getYtDlpBin(): string {
-  const bin = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'
-  return path.join(process.cwd(), 'node_modules', 'yt-dlp-exec', 'bin', bin)
-}
-
-function getFfmpegBin(): string {
-  // ffmpeg-static resolves to the real path via process.cwd(), not __dirname
-  const ext = process.platform === 'win32' ? '.exe' : ''
-  return path.join(process.cwd(), 'node_modules', 'ffmpeg-static', `ffmpeg${ext}`)
-}
-
-const allowedHosts = [
-  'youtube.com', 'www.youtube.com', 'youtu.be', 'm.youtube.com',
-  'facebook.com', 'www.facebook.com', 'fb.watch', 'm.facebook.com',
-  'instagram.com', 'www.instagram.com',
-]
+export const maxDuration = 300  // 5 min — requires Vercel Pro; Hobby cap is 60s
 
 function runYtDlp(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -62,31 +47,30 @@ export async function GET(request: NextRequest) {
       // ── Audio (MP3) ──────────────────────────────────────────────────────
       const outFile = path.join(tmpDir, `${tmpId}.mp3`)
 
-      await runYtDlp([
+      await withRetry(() => runYtDlp([
         url,
         '--ffmpeg-location', getFfmpegBin(),
         '-f', 'bestaudio/best',
         '-x',
         '--audio-format', 'mp3',
-        '--audio-quality', '0',          // best quality
+        '--audio-quality', '0',
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
+        ...youtubeBypassArgs(),
         '-o', outFile,
-      ])
+      ]))
 
       return streamFile(outFile, 'audio/mpeg', 'audio.mp3')
 
     } else {
-      // ── Video + Audio (MP4) ──────────────────────────────────────────────
-      // Always merge best video+audio so the file contains sound
       const formatSelector = formatId
         ? `${formatId}+bestaudio[ext=m4a]/${formatId}+bestaudio/best[height<=${heightFromFormatId(formatId)}][ext=mp4]/best`
         : 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best'
 
       const outFile = path.join(tmpDir, `${tmpId}.mp4`)
 
-      await runYtDlp([
+      await withRetry(() => runYtDlp([
         url,
         '--ffmpeg-location', getFfmpegBin(),
         '-f', formatSelector,
@@ -94,14 +78,20 @@ export async function GET(request: NextRequest) {
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
+        ...youtubeBypassArgs(),
         '-o', outFile,
-      ])
+      ]))
 
       return streamFile(outFile, 'video/mp4', 'video.mp4')
     }
   } catch (err) {
     console.error('Download error:', err)
-    return new Response('Download failed. The video may be unavailable or restricted.', { status: 500 })
+    const msg = err instanceof Error ? err.message : String(err)
+    const isBot = msg.includes('Sign in') || msg.includes('bot')
+    const userMsg = isBot
+      ? 'YouTube is blocking this request. Add a cookies.txt file to the project root — see server logs for instructions.'
+      : 'Download failed. The video may be unavailable or restricted.'
+    return new Response(userMsg, { status: 500 })
   }
 }
 

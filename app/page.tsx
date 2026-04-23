@@ -78,6 +78,8 @@ export default function Home() {
   const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null)
   const [selectedFormat, setSelectedFormat] = useState("")
   const [downloading, setDownloading] = useState<"mp4" | "mp3" | null>(null)
+  const [downloadProgress, setDownloadProgress] = useState(0)
+  const [downloadError, setDownloadError] = useState("")
   const inputRef = useRef<HTMLInputElement>(null)
 
   const detectedPlatform = detectPlatformFromUrl(url)
@@ -105,18 +107,52 @@ export default function Home() {
     }
   }
 
-  function triggerDownload(type: "mp4" | "mp3") {
-    if (!url || !videoInfo) return
+  async function triggerDownload(type: "mp4" | "mp3") {
+    if (!url || !videoInfo || downloading) return
     setDownloading(type)
-    const safeTitle = videoInfo.title.replace(/[^\w\s-]/g, "").trim()
+    setDownloadProgress(0)
+    setDownloadError("")
+
+    const safeTitle = videoInfo.title.replace(/[^\w\s-]/g, "").trim() || "video"
     const params = new URLSearchParams({ url: url.trim(), format_id: selectedFormat, type })
-    const link = document.createElement("a")
-    link.href = `/api/download?${params}`
-    link.download = `${safeTitle}.${type}`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    setTimeout(() => setDownloading(null), 3000)
+
+    try {
+      const res = await fetch(`/api/download?${params}`)
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(text || "Download failed")
+      }
+
+      const contentLength = res.headers.get("Content-Length")
+      const total = contentLength ? parseInt(contentLength, 10) : 0
+      const reader = res.body!.getReader()
+      const chunks: Uint8Array[] = []
+      let received = 0
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        chunks.push(value)
+        received += value.length
+        if (total > 0) setDownloadProgress(Math.round((received / total) * 100))
+      }
+
+      const mimeType = type === "mp4" ? "video/mp4" : "audio/mpeg"
+      const blob = new Blob(chunks, { type: mimeType })
+      const objectUrl = URL.createObjectURL(blob)
+      const link = document.createElement("a")
+      link.href = objectUrl
+      link.download = `${safeTitle}.${type}`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(objectUrl)
+    } catch (e: unknown) {
+      setDownloadError(e instanceof Error ? e.message : "Download failed — please try again")
+    } finally {
+      setDownloading(null)
+      setDownloadProgress(0)
+    }
   }
 
   async function handlePaste() {
@@ -134,6 +170,8 @@ export default function Home() {
     setError("")
     setSelectedFormat("")
     setDownloading(null)
+    setDownloadProgress(0)
+    setDownloadError("")
   }
 
   return (
@@ -280,7 +318,7 @@ export default function Home() {
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                       </svg>
-                      Processing...
+                      {downloadProgress > 0 ? `Downloading ${downloadProgress}%` : "Processing..."}
                     </>
                   ) : (
                     <>
@@ -302,7 +340,7 @@ export default function Home() {
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                       </svg>
-                      Processing...
+                      {downloadProgress > 0 ? `Downloading ${downloadProgress}%` : "Processing..."}
                     </>
                   ) : (
                     <>
@@ -314,16 +352,35 @@ export default function Home() {
 
                 <button
                   onClick={handleReset}
-                  className="px-4 py-3 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl text-white/60 text-sm transition"
+                  disabled={downloading !== null}
+                  className="px-4 py-3 bg-white/10 hover:bg-white/20 disabled:opacity-40 disabled:cursor-not-allowed border border-white/20 rounded-xl text-white/60 text-sm transition"
                 >
                   Reset
                 </button>
               </div>
 
+              {/* Progress bar */}
               {downloading && (
-                <p className="mt-3 text-center text-white/40 text-xs">
-                  Processing on server — this may take a moment for long videos...
-                </p>
+                <div className="mt-3">
+                  <div className="w-full bg-white/10 rounded-full h-1.5 overflow-hidden">
+                    <div
+                      className="h-1.5 rounded-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300"
+                      style={{ width: downloadProgress > 0 ? `${downloadProgress}%` : "30%" }}
+                    />
+                  </div>
+                  <p className="mt-1.5 text-center text-white/40 text-xs">
+                    {downloadProgress > 0
+                      ? `Transferring file… ${downloadProgress}%`
+                      : "Server is processing (merging video + audio)… please wait"}
+                  </p>
+                </div>
+              )}
+
+              {/* Download error */}
+              {downloadError && (
+                <div className="mt-3 p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-300 text-sm">
+                  {downloadError}
+                </div>
               )}
             </div>
           )}
