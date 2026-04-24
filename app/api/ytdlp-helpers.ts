@@ -1,14 +1,27 @@
 import path from 'path'
 import fs from 'fs'
+import { execSync } from 'child_process'
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const ffmpegStaticPath: string | null = require('ffmpeg-static')
+
+function ensureExecutable(binPath: string) {
+  if (process.platform !== 'win32') {
+    try { execSync(`chmod +x "${binPath}"`) } catch {}
+  }
+}
 
 export function getYtDlpBin(): string {
   const bin = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'
-  return path.join(process.cwd(), 'node_modules', 'yt-dlp-exec', 'bin', bin)
+  const binPath = path.join(process.cwd(), 'node_modules', 'yt-dlp-exec', 'bin', bin)
+  ensureExecutable(binPath)
+  return binPath
 }
 
 export function getFfmpegBin(): string {
-  const ext = process.platform === 'win32' ? '.exe' : ''
-  return path.join(process.cwd(), 'node_modules', 'ffmpeg-static', `ffmpeg${ext}`)
+  if (!ffmpegStaticPath) throw new Error('ffmpeg-static binary not found')
+  ensureExecutable(ffmpegStaticPath)
+  return ffmpegStaticPath
 }
 
 /**
